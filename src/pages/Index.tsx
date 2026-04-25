@@ -3,7 +3,19 @@ import Icon from "@/components/ui/icon";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-type Section = "home" | "trainer" | "stats" | "profile";
+type Section = "home" | "trainer" | "tests" | "stats" | "profile";
+type TestMode = "speed" | "exam" | "topic";
+
+interface TestResult {
+  mode: TestMode;
+  type?: TrainerType;
+  difficulty: Difficulty;
+  total: number;
+  correct: number;
+  timeSpent: number;
+  items: { question: string; answer: number; userAnswer: number | null; correct: boolean }[];
+  ts: number;
+}
 type Difficulty = "easy" | "medium" | "hard";
 type TrainerType = "arithmetic" | "algebra" | "geometry";
 
@@ -136,6 +148,7 @@ function NavBar({ section, setSection }: { section: Section; setSection: (s: Sec
   const items = [
     { id: "home" as Section, icon: "Home", label: "Главная" },
     { id: "trainer" as Section, icon: "Brain", label: "Тренажёр" },
+    { id: "tests" as Section, icon: "ClipboardList", label: "Тесты" },
     { id: "stats" as Section, icon: "BarChart3", label: "Прогресс" },
     { id: "profile" as Section, icon: "User", label: "Профиль" },
   ];
@@ -698,6 +711,462 @@ function ProfileSection({ stats, onReset, name, setName }: {
   );
 }
 
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+const TEST_RESULTS_KEY = "mathtrainer_tests";
+
+function getGrade(pct: number) {
+  if (pct >= 90) return { label: "Отлично", emoji: "🏆", color: "text-green-600" };
+  if (pct >= 70) return { label: "Хорошо", emoji: "👍", color: "text-blue-500" };
+  if (pct >= 50) return { label: "Удовлетворительно", emoji: "😐", color: "text-amber-500" };
+  return { label: "Нужно подтянуть", emoji: "📚", color: "text-red-500" };
+}
+
+function TestsSection({ onAnswer }: {
+  onAnswer: (type: TrainerType, diff: Difficulty, correct: boolean, question: string) => void;
+}) {
+  const [phase, setPhase] = useState<"menu" | "config" | "running" | "result">("menu");
+  const [mode, setMode] = useState<TestMode>("speed");
+  const [difficulty, setDifficulty] = useState<Difficulty>("medium");
+  const [topicType, setTopicType] = useState<TrainerType>("arithmetic");
+
+  // running state
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [current, setCurrent] = useState(0);
+  const [input, setInput] = useState("");
+  const [feedback, setFeedback] = useState<"idle" | "correct" | "wrong">("idle");
+  const [items, setItems] = useState<TestResult["items"]>([]);
+  const [startTime, setStartTime] = useState(0);
+  const [elapsed, setElapsed] = useState(0);
+  const [timeLimit, setTimeLimit] = useState(0); // speed: total seconds
+  const [examOver, setExamOver] = useState(false);
+  const [result, setResult] = useState<TestResult | null>(null);
+  const [history, setHistory] = useState<TestResult[]>(() => {
+    try { const s = localStorage.getItem(TEST_RESULTS_KEY); return s ? JSON.parse(s) : []; }
+    catch { return []; }
+  });
+
+  const QUESTION_COUNTS: Record<TestMode, number> = { speed: 20, exam: 15, topic: 12 };
+
+  // Ticker for speed & elapsed
+  useEffect(() => {
+    if (phase !== "running") return;
+    const id = setInterval(() => {
+      const now = Date.now();
+      const spent = Math.floor((now - startTime) / 1000);
+      setElapsed(spent);
+      if (mode === "speed" && spent >= timeLimit) {
+        finishTest(items, spent);
+      }
+    }, 500);
+    return () => clearInterval(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, startTime, timeLimit, mode, items]);
+
+  const buildTasks = (m: TestMode, diff: Difficulty, type: TrainerType): Task[] => {
+    const count = QUESTION_COUNTS[m];
+    const types: TrainerType[] = m === "topic" ? [type] : (["arithmetic", "algebra", "geometry"] as TrainerType[]);
+    return Array.from({ length: count }, (_, i) => generateTask(types[i % types.length], diff));
+  };
+
+  const startTest = () => {
+    const t = buildTasks(mode, difficulty, topicType);
+    const limit = mode === "speed" ? 60 : 0;
+    setTasks(t);
+    setCurrent(0);
+    setInput("");
+    setFeedback("idle");
+    setItems([]);
+    setStartTime(Date.now());
+    setElapsed(0);
+    setTimeLimit(limit);
+    setExamOver(false);
+    setResult(null);
+    setPhase("running");
+  };
+
+  const finishTest = (finalItems: TestResult["items"], spent: number) => {
+    const correct = finalItems.filter(i => i.correct).length;
+    const res: TestResult = {
+      mode, type: mode === "topic" ? topicType : undefined,
+      difficulty, total: finalItems.length,
+      correct, timeSpent: spent, items: finalItems, ts: Date.now(),
+    };
+    setResult(res);
+    const updated = [res, ...history].slice(0, 20);
+    setHistory(updated);
+    localStorage.setItem(TEST_RESULTS_KEY, JSON.stringify(updated));
+    setPhase("result");
+  };
+
+  const submitAnswer = () => {
+    if (feedback !== "idle") return;
+    const val = parseFloat(input.replace(",", "."));
+    const task = tasks[current];
+    const isCorrect = !isNaN(val) && Math.abs(val - task.answer) < 0.01;
+
+    // exam: wrong answer ends test immediately
+    if (mode === "exam" && !isNaN(val) && !isCorrect) {
+      const newItems = [...items, { question: task.question, answer: task.answer, userAnswer: val, correct: false }];
+      setItems(newItems);
+      onAnswer("arithmetic", difficulty, false, task.question);
+      setExamOver(true);
+      setFeedback("wrong");
+      setTimeout(() => finishTest(newItems, Math.floor((Date.now() - startTime) / 1000)), 1200);
+      return;
+    }
+
+    const newItem = { question: task.question, answer: task.answer, userAnswer: isNaN(val) ? null : val, correct: isCorrect };
+    const newItems = [...items, newItem];
+    setItems(newItems);
+    onAnswer("arithmetic", difficulty, isCorrect, task.question);
+    setFeedback(isCorrect ? "correct" : "wrong");
+
+    setTimeout(() => {
+      if (current + 1 >= tasks.length) {
+        finishTest(newItems, Math.floor((Date.now() - startTime) / 1000));
+      } else {
+        setCurrent((c) => c + 1);
+        setInput("");
+        setFeedback("idle");
+      }
+    }, isCorrect ? 600 : 1000);
+  };
+
+  const skipAnswer = () => {
+    const task = tasks[current];
+    const newItem = { question: task.question, answer: task.answer, userAnswer: null, correct: false };
+    const newItems = [...items, newItem];
+    setItems(newItems);
+    if (mode === "exam") {
+      setExamOver(true);
+      setFeedback("wrong");
+      setTimeout(() => finishTest(newItems, Math.floor((Date.now() - startTime) / 1000)), 1000);
+      return;
+    }
+    if (current + 1 >= tasks.length) {
+      finishTest(newItems, Math.floor((Date.now() - startTime) / 1000));
+    } else {
+      setCurrent((c) => c + 1);
+      setInput("");
+      setFeedback("idle");
+    }
+  };
+
+  // ── Menu ──
+  if (phase === "menu") {
+    const modeCards: { mode: TestMode; icon: string; title: string; desc: string; badge: string }[] = [
+      { mode: "speed", icon: "Timer", title: "На время", desc: "20 задач за 60 секунд. Успей как можно больше!", badge: "⏱ 60 сек" },
+      { mode: "exam", icon: "GraduationCap", title: "Экзамен", desc: "15 задач. Одна ошибка — и тест завершён.", badge: "☠️ Один шанс" },
+      { mode: "topic", icon: "BookOpen", title: "По теме", desc: "12 задач по одному разделу с разбором ошибок.", badge: "📖 12 задач" },
+    ];
+    return (
+      <div className="space-y-8 animate-fade-in">
+        <div>
+          <p className="text-xs font-mono text-[hsl(var(--muted-foreground))] uppercase tracking-widest mb-1">Тестирование</p>
+          <h2 className="font-golos font-black text-3xl text-[hsl(var(--foreground))]">Выбери режим</h2>
+        </div>
+
+        <div className="space-y-3">
+          {modeCards.map((c) => (
+            <button key={c.mode} onClick={() => { setMode(c.mode); setPhase("config"); }}
+              className="w-full bg-white border border-[hsl(var(--border))] rounded-xl p-5 text-left hover:border-[hsl(var(--foreground))] transition-all group">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 bg-[hsl(var(--secondary))] rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 group-hover:bg-[hsl(var(--foreground))] group-hover:text-white transition-all">
+                    <Icon name={c.icon} size={20} />
+                  </div>
+                  <div>
+                    <div className="font-golos font-bold text-[hsl(var(--foreground))] mb-1">{c.title}</div>
+                    <div className="text-sm text-[hsl(var(--muted-foreground))]">{c.desc}</div>
+                  </div>
+                </div>
+                <span className="text-xs font-mono bg-[hsl(var(--secondary))] px-2 py-1 rounded-md flex-shrink-0 text-[hsl(var(--muted-foreground))]">{c.badge}</span>
+              </div>
+            </button>
+          ))}
+        </div>
+
+        {history.length > 0 && (
+          <div>
+            <h3 className="font-golos font-semibold text-xs text-[hsl(var(--muted-foreground))] uppercase tracking-wider mb-3">Последние результаты</h3>
+            <div className="space-y-2">
+              {history.slice(0, 5).map((h, i) => {
+                const pct = h.total > 0 ? Math.round(h.correct / h.total * 100) : 0;
+                const grade = getGrade(pct);
+                const mLabel = h.mode === "speed" ? "На время" : h.mode === "exam" ? "Экзамен" : "По теме";
+                return (
+                  <div key={i} className="flex items-center justify-between py-2 border-b border-[hsl(var(--border))] last:border-0">
+                    <div>
+                      <span className="font-golos text-sm text-[hsl(var(--foreground))]">{mLabel}</span>
+                      <span className="text-xs text-[hsl(var(--muted-foreground))] ml-2 font-mono">· {DIFF_LABELS[h.difficulty]}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`font-mono font-bold text-sm ${grade.color}`}>{pct}%</span>
+                      <span className="text-base">{grade.emoji}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── Config ──
+  if (phase === "config") {
+    const modeTitle = mode === "speed" ? "На время" : mode === "exam" ? "Экзамен" : "По теме";
+    return (
+      <div className="space-y-6 animate-fade-in">
+        <div>
+          <button onClick={() => setPhase("menu")} className="flex items-center gap-1.5 text-sm text-[hsl(var(--muted-foreground))] mb-4 hover:text-[hsl(var(--foreground))] transition-colors">
+            <Icon name="ChevronLeft" size={16} /> Назад
+          </button>
+          <p className="text-xs font-mono text-[hsl(var(--muted-foreground))] uppercase tracking-widest mb-1">Настройка теста</p>
+          <h2 className="font-golos font-black text-3xl text-[hsl(var(--foreground))]">{modeTitle}</h2>
+        </div>
+
+        {mode === "topic" && (
+          <div className="bg-white border border-[hsl(var(--border))] rounded-xl p-4 space-y-3">
+            <p className="text-xs font-golos font-semibold text-[hsl(var(--muted-foreground))] uppercase tracking-wider">Раздел</p>
+            <div className="flex gap-1.5">
+              {(["arithmetic", "algebra", "geometry"] as TrainerType[]).map((t) => (
+                <button key={t} onClick={() => setTopicType(t)}
+                  className={`flex-1 py-2.5 text-xs font-mono font-semibold rounded-lg border transition-all ${topicType === t ? "bg-[hsl(var(--foreground))] text-white border-transparent" : "border-[hsl(var(--border))] text-[hsl(var(--muted-foreground))]"}`}>
+                  {TYPE_LABELS[t].slice(0, 4)}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="bg-white border border-[hsl(var(--border))] rounded-xl p-4 space-y-3">
+          <p className="text-xs font-golos font-semibold text-[hsl(var(--muted-foreground))] uppercase tracking-wider">Сложность</p>
+          <div className="flex gap-1.5">
+            {(["easy", "medium", "hard"] as Difficulty[]).map((d) => (
+              <button key={d} onClick={() => setDifficulty(d)}
+                className={`flex-1 py-2.5 text-xs font-mono font-semibold rounded-lg border transition-all ${difficulty === d ? "bg-[hsl(var(--foreground))] text-white border-transparent" : "border-[hsl(var(--border))] text-[hsl(var(--muted-foreground))]"}`}>
+                {DIFF_LABELS[d]}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="bg-[hsl(var(--secondary))] rounded-xl p-4 space-y-2 text-sm text-[hsl(var(--muted-foreground))] font-golos">
+          {mode === "speed" && <><p>⏱ 60 секунд, 20 задач</p><p>Задачи из всех разделов. Чем больше ответишь — тем выше балл.</p></>}
+          {mode === "exam" && <><p>☠️ 15 задач, без подсказок</p><p>Одна неверная ошибка завершает тест. Нет кнопки «Пропустить».</p></>}
+          {mode === "topic" && <><p>📖 12 задач по одному разделу</p><p>После теста — подробный разбор каждого вопроса.</p></>}
+        </div>
+
+        <button onClick={startTest}
+          className="w-full h-14 bg-[hsl(var(--foreground))] text-white font-golos font-bold text-lg rounded-xl hover:opacity-80 active:scale-95 transition-all">
+          Начать тест →
+        </button>
+      </div>
+    );
+  }
+
+  // ── Running ──
+  if (phase === "running" && tasks.length > 0) {
+    const task = tasks[current];
+    const progress = (current / tasks.length) * 100;
+    const speedTimeLeft = Math.max(0, timeLimit - elapsed);
+    const speedUrgent = mode === "speed" && speedTimeLeft <= 10;
+
+    return (
+      <div className="space-y-5 animate-fade-in">
+        {/* Header */}
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-xs font-mono text-[hsl(var(--muted-foreground))] uppercase tracking-widest">
+              {mode === "speed" ? "На время" : mode === "exam" ? "Экзамен" : TYPE_LABELS[topicType]}
+            </p>
+            {mode !== "speed" && (
+              <p className="font-golos font-bold text-[hsl(var(--foreground))]">
+                {current + 1} / {tasks.length}
+              </p>
+            )}
+          </div>
+          {mode === "speed" && (
+            <div className={`font-mono font-black text-3xl tabular-nums transition-colors ${speedUrgent ? "text-red-500" : "text-[hsl(var(--foreground))]"}`}>
+              {speedTimeLeft}с
+            </div>
+          )}
+          {mode === "exam" && (
+            <div className="flex items-center gap-1.5 font-mono text-sm text-[hsl(var(--muted-foreground))]">
+              <Icon name="Clock" size={14} /> {elapsed}с
+            </div>
+          )}
+          {mode === "topic" && (
+            <div className="flex items-center gap-1.5 font-mono text-sm text-[hsl(var(--muted-foreground))]">
+              <Icon name="Clock" size={14} /> {elapsed}с
+            </div>
+          )}
+        </div>
+
+        {/* Progress */}
+        {mode !== "speed" && (
+          <div className="w-full h-1 bg-[hsl(var(--border))] rounded-full overflow-hidden">
+            <div className="h-full bg-[hsl(var(--foreground))] rounded-full transition-all duration-300" style={{ width: `${progress}%` }} />
+          </div>
+        )}
+        {mode === "speed" && (
+          <div className="w-full h-1 bg-[hsl(var(--border))] rounded-full overflow-hidden">
+            <div className={`h-full rounded-full transition-all duration-500 ${speedUrgent ? "bg-red-500" : "bg-[hsl(var(--foreground))]"}`}
+              style={{ width: `${(speedTimeLeft / timeLimit) * 100}%` }} />
+          </div>
+        )}
+
+        {/* Speed: answered count */}
+        {mode === "speed" && (
+          <div className="flex items-center gap-2 text-sm text-[hsl(var(--muted-foreground))]">
+            <Icon name="CheckCircle2" size={14} />
+            <span className="font-mono">{items.filter(i => i.correct).length} верно · {items.length} отвечено</span>
+          </div>
+        )}
+
+        {/* Exam: one-chance warning */}
+        {mode === "exam" && !examOver && (
+          <div className="flex items-center gap-2 text-xs text-red-400 font-golos">
+            <Icon name="AlertTriangle" size={13} /> Одна ошибка — тест завершён
+          </div>
+        )}
+
+        {/* Task card */}
+        <div className={`bg-white border-2 rounded-2xl p-8 text-center transition-all animate-scale-in ${
+          feedback === "correct" ? "border-green-400" : feedback === "wrong" ? "border-red-400"
+          : speedUrgent ? "border-red-200" : "border-[hsl(var(--border))]"
+        }`}>
+          <p className="font-golos font-bold text-3xl text-[hsl(var(--foreground))] leading-tight">{task.question}</p>
+          {feedback === "correct" && (
+            <div className="mt-4 text-green-600 font-golos font-semibold animate-scale-in">✓ Верно!</div>
+          )}
+          {feedback === "wrong" && (
+            <div className="mt-4 animate-fade-in">
+              <div className="text-red-500 font-golos font-semibold">{examOver ? "☠️ Тест завершён" : "✗ Неверно"}</div>
+              <p className="text-sm text-[hsl(var(--muted-foreground))] mt-1">
+                Ответ: <span className="font-mono font-bold text-[hsl(var(--foreground))]">{task.answer}</span>
+              </p>
+            </div>
+          )}
+        </div>
+
+        {/* Input */}
+        {feedback === "idle" && (
+          <div className="space-y-2 animate-fade-in">
+            <div className="flex gap-2">
+              <input
+                type="number"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && submitAnswer()}
+                placeholder="Ответ..."
+                className={`flex-1 h-14 px-4 font-mono text-xl text-center rounded-xl border-2 outline-none bg-white transition-colors ${speedUrgent ? "border-red-300 focus:border-red-500" : "border-[hsl(var(--border))] focus:border-[hsl(var(--foreground))]"}`}
+                autoFocus
+              />
+              <button onClick={submitAnswer} disabled={!input}
+                className="w-14 h-14 bg-[hsl(var(--foreground))] text-white rounded-xl font-bold text-xl disabled:opacity-30 transition-all hover:opacity-80 active:scale-95">
+                →
+              </button>
+            </div>
+            {mode !== "exam" && (
+              <button onClick={skipAnswer}
+                className="w-full h-10 text-sm font-golos text-[hsl(var(--muted-foreground))] border border-[hsl(var(--border))] rounded-lg hover:border-[hsl(var(--foreground))] transition-all">
+                Пропустить
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── Result ──
+  if (phase === "result" && result) {
+    const pct = result.total > 0 ? Math.round(result.correct / result.total * 100) : 0;
+    const grade = getGrade(pct);
+    const mins = Math.floor(result.timeSpent / 60);
+    const secs = result.timeSpent % 60;
+    const timeStr = mins > 0 ? `${mins} мин ${secs} сек` : `${secs} сек`;
+
+    return (
+      <div className="space-y-6 animate-fade-in">
+        {/* Result hero */}
+        <div className="bg-white border-2 border-[hsl(var(--foreground))] rounded-2xl p-8 text-center">
+          <div className="text-5xl mb-3">{grade.emoji}</div>
+          <div className={`font-golos font-black text-4xl mb-1 ${grade.color}`}>{pct}%</div>
+          <div className="font-golos font-semibold text-[hsl(var(--foreground))]">{grade.label}</div>
+          <div className="mt-4 grid grid-cols-3 gap-3 text-center">
+            <div>
+              <div className="font-mono font-bold text-xl text-[hsl(var(--foreground))]">{result.correct}</div>
+              <div className="text-[10px] text-[hsl(var(--muted-foreground))]">верных</div>
+            </div>
+            <div>
+              <div className="font-mono font-bold text-xl text-[hsl(var(--foreground))]">{result.total - result.correct}</div>
+              <div className="text-[10px] text-[hsl(var(--muted-foreground))]">ошибок</div>
+            </div>
+            <div>
+              <div className="font-mono font-bold text-xl text-[hsl(var(--foreground))]">{timeStr}</div>
+              <div className="text-[10px] text-[hsl(var(--muted-foreground))]">времени</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Разбор ошибок — для topic и exam */}
+        {(mode === "topic" || mode === "exam") && result.items.some(i => !i.correct) && (
+          <div>
+            <h3 className="font-golos font-semibold text-xs text-[hsl(var(--muted-foreground))] uppercase tracking-wider mb-3">Разбор ошибок</h3>
+            <div className="space-y-2">
+              {result.items.filter(i => !i.correct).map((item, idx) => (
+                <div key={idx} className="bg-red-50 border border-red-200 rounded-xl p-3">
+                  <div className="font-mono font-semibold text-[hsl(var(--foreground))] text-sm">{item.question}</div>
+                  <div className="flex gap-4 mt-1 text-xs">
+                    <span className="text-red-500">
+                      Твой: <span className="font-mono font-bold">{item.userAnswer ?? "—"}</span>
+                    </span>
+                    <span className="text-green-600">
+                      Верно: <span className="font-mono font-bold">{item.answer}</span>
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Speed: all answered */}
+        {mode === "speed" && (
+          <div>
+            <h3 className="font-golos font-semibold text-xs text-[hsl(var(--muted-foreground))] uppercase tracking-wider mb-3">Ответы</h3>
+            <div className="grid grid-cols-5 gap-1.5">
+              {result.items.map((item, idx) => (
+                <div key={idx} className={`h-8 rounded-lg flex items-center justify-center text-xs font-mono font-bold ${item.correct ? "bg-green-100 text-green-600" : "bg-red-100 text-red-500"}`}>
+                  {item.correct ? "✓" : "✗"}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="flex gap-2">
+          <button onClick={() => setPhase("config")}
+            className="flex-1 h-12 bg-[hsl(var(--foreground))] text-white font-golos font-semibold rounded-xl hover:opacity-80 transition-all">
+            Ещё раз
+          </button>
+          <button onClick={() => setPhase("menu")}
+            className="flex-1 h-12 border border-[hsl(var(--border))] text-[hsl(var(--foreground))] font-golos font-semibold rounded-xl hover:border-[hsl(var(--foreground))] transition-all">
+            В меню
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return null;
+}
+
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 const STATS_KEY = "mathtrainer_stats";
@@ -762,6 +1231,7 @@ export default function Index() {
         {section === "trainer" && (
           <TrainerSection key={`${trainerType}-${trainerDiff}`} initialType={trainerType} initialDiff={trainerDiff} onAnswer={handleAnswer} />
         )}
+        {section === "tests" && <TestsSection onAnswer={handleAnswer} />}
         {section === "stats" && <StatsSection stats={stats} />}
         {section === "profile" && <ProfileSection stats={stats} onReset={resetStats} name={name} setName={setName} />}
       </div>
