@@ -261,6 +261,35 @@ function HomeSection({ stats, setSection, setTrainerConfig }: {
 
 // ─── Trainer ──────────────────────────────────────────────────────────────────
 
+const TIMER_SECONDS: Record<Difficulty, number> = { easy: 30, medium: 45, hard: 60 };
+
+function TimerRing({ seconds, max, urgent }: { seconds: number; max: number; urgent: boolean }) {
+  const size = 56;
+  const stroke = 3;
+  const r = (size - stroke) / 2;
+  const circ = 2 * Math.PI * r;
+  const progress = seconds / max;
+  const dash = circ * progress;
+
+  return (
+    <div className="relative flex items-center justify-center" style={{ width: size, height: size }}>
+      <svg width={size} height={size} className="-rotate-90">
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="hsl(var(--border))" strokeWidth={stroke} />
+        <circle
+          cx={size / 2} cy={size / 2} r={r} fill="none"
+          stroke={urgent ? "#ef4444" : seconds <= max * 0.4 ? "#f59e0b" : "hsl(var(--foreground))"}
+          strokeWidth={stroke} strokeDasharray={`${dash} ${circ}`}
+          strokeLinecap="round"
+          style={{ transition: "stroke-dasharray 0.9s linear, stroke 0.3s" }}
+        />
+      </svg>
+      <span className={`absolute font-mono font-bold text-sm ${urgent ? "text-red-500" : seconds <= max * 0.4 ? "text-amber-500" : "text-[hsl(var(--foreground))]"}`}>
+        {seconds}
+      </span>
+    </div>
+  );
+}
+
 function TrainerSection({ initialType, initialDiff, onAnswer }: {
   initialType: TrainerType;
   initialDiff: Difficulty;
@@ -270,12 +299,17 @@ function TrainerSection({ initialType, initialDiff, onAnswer }: {
   const [difficulty, setDifficulty] = useState<Difficulty>(initialDiff);
   const [task, setTask] = useState<Task>(() => generateTask(initialType, initialDiff));
   const [input, setInput] = useState("");
-  const [feedback, setFeedback] = useState<"idle" | "correct" | "wrong">("idle");
+  const [feedback, setFeedback] = useState<"idle" | "correct" | "wrong" | "timeout">("idle");
   const [showHint, setShowHint] = useState(false);
   const [sessionCorrect, setSessionCorrect] = useState(0);
   const [sessionTotal, setSessionTotal] = useState(0);
   const [streak, setStreak] = useState(0);
   const [animKey, setAnimKey] = useState(0);
+  const [timeLeft, setTimeLeft] = useState(TIMER_SECONDS[initialDiff]);
+  const [timerActive, setTimerActive] = useState(true);
+
+  const maxTime = TIMER_SECONDS[difficulty];
+  const urgent = timeLeft <= 8 && timerActive && feedback === "idle";
 
   const nextTask = useCallback((type: TrainerType, diff: Difficulty) => {
     setTask(generateTask(type, diff));
@@ -283,13 +317,30 @@ function TrainerSection({ initialType, initialDiff, onAnswer }: {
     setFeedback("idle");
     setShowHint(false);
     setAnimKey((k) => k + 1);
+    setTimeLeft(TIMER_SECONDS[diff]);
+    setTimerActive(true);
   }, []);
 
   useEffect(() => { nextTask(trainerType, difficulty); }, [trainerType, difficulty]);
 
+  useEffect(() => {
+    if (!timerActive || feedback !== "idle") return;
+    if (timeLeft <= 0) {
+      setFeedback("timeout");
+      setTimerActive(false);
+      onAnswer(trainerType, difficulty, false, task.question);
+      setSessionTotal((t) => t + 1);
+      setStreak(0);
+      return;
+    }
+    const id = setTimeout(() => setTimeLeft((t) => t - 1), 1000);
+    return () => clearTimeout(id);
+  }, [timeLeft, timerActive, feedback, trainerType, difficulty, task.question, onAnswer]);
+
   const submit = () => {
     const val = parseFloat(input.replace(",", "."));
     if (isNaN(val)) return;
+    setTimerActive(false);
     const correct = Math.abs(val - task.answer) < 0.01;
     setFeedback(correct ? "correct" : "wrong");
     onAnswer(trainerType, difficulty, correct, task.question);
@@ -324,25 +375,33 @@ function TrainerSection({ initialType, initialDiff, onAnswer }: {
         </div>
       </div>
 
-      <div className="flex items-center gap-4 h-6">
-        <div className="flex items-center gap-1.5 text-sm text-[hsl(var(--muted-foreground))]">
-          <Icon name="CheckCircle2" size={14} />
-          <span className="font-mono">{sessionCorrect}/{sessionTotal}</span>
-        </div>
-        {streak > 1 && (
-          <div className="flex items-center gap-1 text-sm font-mono font-bold text-orange-500 animate-scale-in">
-            🔥 ×{streak}
+      <div className="flex items-center justify-between h-14">
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-1.5 text-sm text-[hsl(var(--muted-foreground))]">
+            <Icon name="CheckCircle2" size={14} />
+            <span className="font-mono">{sessionCorrect}/{sessionTotal}</span>
           </div>
-        )}
+          {streak > 1 && (
+            <div className="flex items-center gap-1 text-sm font-mono font-bold text-orange-500 animate-scale-in">
+              🔥 ×{streak}
+            </div>
+          )}
+        </div>
+        <TimerRing seconds={timeLeft} max={maxTime} urgent={urgent} />
       </div>
 
       <div key={animKey} className={`bg-white border-2 rounded-2xl p-8 text-center transition-all duration-200 animate-scale-in ${
-        feedback === "correct" ? "border-green-400" : feedback === "wrong" ? "border-red-400" : "border-[hsl(var(--border))]"
+        feedback === "correct" ? "border-green-400"
+        : feedback === "wrong" || feedback === "timeout" ? "border-red-400"
+        : urgent ? "border-red-200"
+        : "border-[hsl(var(--border))]"
       }`}>
         <p className="text-[10px] font-mono text-[hsl(var(--muted-foreground))] uppercase tracking-widest mb-4">
           {TYPE_LABELS[trainerType]} · {DIFF_LABELS[difficulty]}
         </p>
-        <p className="font-golos font-bold text-3xl text-[hsl(var(--foreground))] leading-tight">{task.question}</p>
+        <p className={`font-golos font-bold text-3xl leading-tight transition-colors ${urgent ? "text-red-500" : "text-[hsl(var(--foreground))]"}`}>
+          {task.question}
+        </p>
 
         {feedback === "correct" && (
           <div className="mt-5 flex items-center justify-center gap-2 text-green-600 font-golos font-semibold text-lg animate-scale-in">
@@ -352,6 +411,14 @@ function TrainerSection({ initialType, initialDiff, onAnswer }: {
         {feedback === "wrong" && (
           <div className="mt-5 animate-fade-in">
             <div className="flex items-center justify-center gap-2 text-red-500 font-golos font-semibold">✗ Неверно</div>
+            <p className="text-sm text-[hsl(var(--muted-foreground))] mt-1">
+              Ответ: <span className="font-mono font-bold text-[hsl(var(--foreground))]">{task.answer}</span>
+            </p>
+          </div>
+        )}
+        {feedback === "timeout" && (
+          <div className="mt-5 animate-fade-in">
+            <div className="flex items-center justify-center gap-2 text-red-500 font-golos font-semibold">⏰ Время вышло!</div>
             <p className="text-sm text-[hsl(var(--muted-foreground))] mt-1">
               Ответ: <span className="font-mono font-bold text-[hsl(var(--foreground))]">{task.answer}</span>
             </p>
@@ -368,7 +435,7 @@ function TrainerSection({ initialType, initialDiff, onAnswer }: {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && submit()}
               placeholder="Твой ответ..."
-              className="flex-1 h-14 px-4 font-mono text-xl text-center rounded-xl border-2 border-[hsl(var(--border))] focus:border-[hsl(var(--foreground))] outline-none bg-white transition-colors"
+              className={`flex-1 h-14 px-4 font-mono text-xl text-center rounded-xl border-2 outline-none bg-white transition-colors ${urgent ? "border-red-300 focus:border-red-500" : "border-[hsl(var(--border))] focus:border-[hsl(var(--foreground))]"}`}
               autoFocus
             />
             <button
@@ -399,7 +466,7 @@ function TrainerSection({ initialType, initialDiff, onAnswer }: {
         </div>
       )}
 
-      {feedback === "wrong" && (
+      {(feedback === "wrong" || feedback === "timeout") && (
         <button onClick={() => nextTask(trainerType, difficulty)}
           className="w-full h-12 bg-[hsl(var(--foreground))] text-white font-golos font-semibold rounded-xl hover:opacity-80 transition-all animate-fade-in">
           Следующая задача →
@@ -670,8 +737,27 @@ export default function Index() {
   const resetStats = () => { setStats(INITIAL_STATS); localStorage.setItem(STATS_KEY, JSON.stringify(INITIAL_STATS)); };
 
   return (
-    <div className="min-h-screen bg-[hsl(var(--background))] font-golos">
-      <div className="max-w-lg mx-auto px-4 pt-8 pb-28">
+    <div className="min-h-screen bg-[hsl(var(--background))] font-golos relative overflow-x-hidden">
+      {/* Декоративный фон */}
+      <div className="fixed inset-0 pointer-events-none z-0" aria-hidden>
+        <svg className="absolute top-0 right-0 w-80 h-80 opacity-[0.035]" viewBox="0 0 320 320" fill="none">
+          <circle cx="260" cy="60" r="140" stroke="#111" strokeWidth="1.5"/>
+          <circle cx="260" cy="60" r="100" stroke="#111" strokeWidth="1"/>
+          <circle cx="260" cy="60" r="60" stroke="#111" strokeWidth="0.8"/>
+        </svg>
+        <svg className="absolute bottom-24 left-0 w-64 h-64 opacity-[0.03]" viewBox="0 0 256 256" fill="none">
+          <rect x="20" y="20" width="100" height="100" stroke="#111" strokeWidth="1.2" transform="rotate(15 70 70)"/>
+          <rect x="50" y="50" width="60" height="60" stroke="#111" strokeWidth="0.8" transform="rotate(15 80 80)"/>
+          <rect x="80" y="80" width="30" height="30" stroke="#111" strokeWidth="0.6" transform="rotate(15 95 95)"/>
+        </svg>
+        <svg className="absolute top-1/3 left-4 w-48 h-48 opacity-[0.025]" viewBox="0 0 192 192" fill="none">
+          <polygon points="96,10 182,182 10,182" stroke="#111" strokeWidth="1.2"/>
+          <polygon points="96,40 162,162 30,162" stroke="#111" strokeWidth="0.8"/>
+          <polygon points="96,70 142,142 50,142" stroke="#111" strokeWidth="0.5"/>
+        </svg>
+        <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-black/8 to-transparent"/>
+      </div>
+      <div className="relative z-10 max-w-lg mx-auto px-4 pt-8 pb-28">
         {section === "home" && <HomeSection stats={stats} setSection={setSection} setTrainerConfig={setTrainerConfig} />}
         {section === "trainer" && (
           <TrainerSection key={`${trainerType}-${trainerDiff}`} initialType={trainerType} initialDiff={trainerDiff} onAnswer={handleAnswer} />
